@@ -2426,91 +2426,202 @@ if('serviceWorker' in navigator)navigator.serviceWorker.register('data:text/java
   }
 
   function buildPlanSummary(snapshot, actualPos, source){
-    const st = snapshot && snapshot.strategy_state ? snapshot.strategy_state : {};
-    const intent = txt(st.intent || snapshot && snapshot.current_signal || 'HOLD').toUpperCase() || 'HOLD';
-    const routeUsed = txt(snapshot && snapshot.route_used || 'local_fallback') || 'local_fallback';
-    const trusted = routeUsed === 'strategy_live';
-    const topic = compactTopic(st.topic_momentum || snapshot && snapshot.topic_momentum || {});
-    const stop = num(st.stop_price, 0);
-    const actualHasPos = !!(actualPos && Math.abs(num(actualPos.qty, 0)) > 0);
-    const expectedHasPos = !!(st.has_position || ['BUY','ADD','TRIM','HOLD_POS'].includes(intent));
-    const price = actualHasPos ? num(actualPos.last_price, num(st.market_price, 0)) : num(st.market_price, 0);
-    const distStop = stop > 0 && price > 0 ? ((price / stop) - 1) * 100 : null;
+    const st        = snapshot && snapshot.strategy_state ? snapshot.strategy_state : {};
+    const intent    = txt(st.intent || (snapshot && snapshot.current_signal) || 'HOLD').toUpperCase() || 'HOLD';
+    const routeUsed = txt((snapshot && snapshot.route_used) || 'local_fallback') || 'local_fallback';
+    const trusted   = routeUsed === 'strategy_live';
+    const topic     = compactTopic(st.topic_momentum || (snapshot && snapshot.topic_momentum) || {});
+
+    // ── Core numbers ──────────────────────────────────────────────────
+    const score      = num(st.score, 0);
+    const rsi        = num(st.rsi, 0);
+    const stop       = num(st.stop_price, 0);
+    const peak       = num(st.peak_price, 0);
+    const buyThr     = num(st.thresholds && st.thresholds.buy,  0.58);
+    const sellThr    = num(st.thresholds && st.thresholds.sell, 0.42);
+    const daysHeld   = num(st.days_held, 0);
+    const trimCount  = num(st.trim_count, 0);
+    const cdLeft     = num(st.cooldown_bars_left, 0);
+    const avgPrice   = num(st.avg_price, 0);
+    const bbIdx      = num(st.bull_bear && st.bull_bear.index, 0);
+    const mktLevel   = num(st.market_context && st.market_context.level, 3);
+    const topicLv    = num(topic.score_5, 0);
+    const topicHold  = !!(topic.hold);
+    const regime     = txt(st.regime || '');
+
+    const actualHasPos  = !!(actualPos && Math.abs(num(actualPos.qty, 0)) > 0);
+    const expectedHasPos= !!(st.has_position || ['BUY','ADD','TRIM','HOLD_POS'].includes(intent));
+    const price         = actualHasPos
+      ? num(actualPos.last_price, num(actualPos.cur_price, num(st.market_price, 0)))
+      : num(st.market_price, 0);
+    const pnlPct        = avgPrice > 0 && price > 0 ? (price / avgPrice - 1) * 100 : num(st.unrealized_pct, 0);
+    const distStop      = stop > 0 && price > 0 ? (price / stop - 1) * 100 : null;
+    const distEntry     = buyThr > 0 && score >= 0 ? (buyThr - score) : null;
+    const trimPct       = Math.round(trimFraction(snapshot) * 100);
+
+    // ── Regime label map ─────────────────────────────────────────────
+    const regimeLabel = {
+      trend_bull:          '強勢上漲趨勢',
+      trend_bull_euphoria: '趨勢過熱',
+      range_bullish:       '偏多震盪',
+      range:               '區間整理',
+      squeeze:             '盤整收縮（蓄勢）',
+      range_bearish:       '偏空震盪',
+      trend_bear:          '下跌趨勢',
+      trend_bear_panic:    '恐慌性下跌',
+    }[regime] || regime;
+
+    // ── Status chip ───────────────────────────────────────────────────
     let statusLabel = '等待';
-    let statusCls = 'plan-neutral';
-    let progress = '目前先維持觀察。';
+    let statusCls   = 'plan-neutral';
 
     if (actualHasPos && !expectedHasPos) {
       statusLabel = trusted ? '不同步' : '待確認';
-      statusCls = trusted ? 'plan-bad' : 'plan-watch';
-      progress = trusted ? '你目前仍持有，但回測邏輯偏向空手/等待。' : '本地推估偏向空手，建議再確認一次。';
+      statusCls   = trusted ? 'plan-bad' : 'plan-watch';
     } else if (!actualHasPos && expectedHasPos) {
-      statusLabel = intent === 'BUY' || intent === 'ADD' ? '可布局' : '待布局';
-      statusCls = 'plan-ok';
-      progress = 'AI 偏向有倉位，你目前空手，可等待合適點位。';
+      statusLabel = (intent === 'BUY' || intent === 'ADD') ? '可布局' : '待布局';
+      statusCls   = 'plan-ok';
     } else if (actualHasPos && intent === 'SELL') {
       statusLabel = trusted ? '應離場' : '偏弱';
-      statusCls = trusted ? 'plan-bad' : 'plan-watch';
-      progress = stop > 0 ? '已進入出場邏輯，風險線約 $' + fmtMoney(stop, 2) + '。' : '訊號轉弱，偏向先出場控制風險。';
+      statusCls   = trusted ? 'plan-bad' : 'plan-watch';
     } else if (actualHasPos && intent === 'TRIM') {
       statusLabel = '先減碼';
-      statusCls = 'plan-watch';
-      progress = 'AI 預計先減碼約 ' + Math.round(trimFraction(snapshot) * 100) + '%，保留觀察部位。';
-    } else if (actualHasPos && stop > 0 && distStop != null) {
-      if (distStop < 0) {
-        statusLabel = trusted ? '偏離' : '失守';
-        statusCls = 'plan-bad';
-        progress = '現價已低於風險線 ' + fmtMoney(Math.abs(distStop), 1) + '%，建議優先檢查。';
-      } else if (distStop <= 2.5) {
-        statusLabel = '警戒';
-        statusCls = 'plan-watch';
-        progress = '距風險線僅剩 ' + fmtMoney(distStop, 1) + '%，接近下一步動作。';
-      } else {
-        statusLabel = expectedHasPos ? (trusted ? '依計畫' : '大致一致') : '觀察';
-        statusCls = expectedHasPos ? 'plan-ok' : 'plan-neutral';
-        progress = '目前仍在安全區，距風險線 ' + fmtMoney(distStop, 1) + '%。';
-      }
+      statusCls   = 'plan-watch';
+    } else if (distStop != null) {
+      if (distStop < 0)        { statusLabel = '失守停損'; statusCls = 'plan-bad'; }
+      else if (distStop <= 2.5){ statusLabel = '警戒';    statusCls = 'plan-watch'; }
+      else                     { statusLabel = expectedHasPos ? (trusted ? '依計畫' : '大致一致') : '觀察'; statusCls = expectedHasPos ? 'plan-ok' : 'plan-neutral'; }
     } else if (!actualHasPos && !expectedHasPos) {
-      statusLabel = '等待';
-      statusCls = 'plan-neutral';
-      progress = '目前空手，符合 AI 等待條件。';
+      statusLabel = '等待'; statusCls = 'plan-neutral';
     }
 
-    let nextAction = '先等更明確訊號';
-    if (intent === 'BUY') nextAction = '可開始分批買入';
-    else if (intent === 'ADD') nextAction = '續強可考慮加碼';
-    else if (intent === 'HOLD_POS') nextAction = stop > 0 ? ('續抱，守住 $' + fmtMoney(stop, 2)) : '續抱觀察';
-    else if (intent === 'TRIM') nextAction = '先減碼約 ' + Math.round(trimFraction(snapshot) * 100) + '%';
-    else if (intent === 'SELL') nextAction = '偏向全出，先控風險';
-    else if (intent === 'COOLDOWN') nextAction = '冷卻觀察，暫不重買';
-    else if (intent === 'HOLD_CASH') nextAction = '先空手，等條件轉強';
+    // ── nextAction：帶具體數字的一句話 ───────────────────────────────
+    let nextAction = '等更明確訊號';
+    if (intent === 'BUY') {
+      nextAction = 'score ' + score.toFixed(3) + ' ≥ ' + buyThr.toFixed(2) + '，可分批進場';
+    } else if (intent === 'ADD') {
+      nextAction = stop > 0
+        ? '可加碼，守住 $' + fmtMoney(stop, 2) + '（距現價 -' + fmtMoney(Math.max(0, distStop || 0), 1) + '%）'
+        : '續強可考慮加碼';
+    } else if (intent === 'HOLD_POS') {
+      if (stop > 0 && distStop != null) {
+        nextAction = '續抱，停損 $' + fmtMoney(stop, 2) + '（距現價 ' + fmtMoney(distStop, 1) + '%）';
+      } else {
+        nextAction = '續抱觀察，score ' + score.toFixed(3);
+      }
+    } else if (intent === 'TRIM') {
+      nextAction = '減碼 ' + trimPct + '%（已減 ' + trimCount + ' 次），保留核心倉';
+    } else if (intent === 'SELL') {
+      nextAction = score > 0
+        ? 'score ' + score.toFixed(3) + ' < 賣出門檻 ' + sellThr.toFixed(2) + '，偏向出場'
+        : '訊號轉空，偏向全出先控風險';
+    } else if (intent === 'COOLDOWN') {
+      nextAction = '冷卻中，剩約 ' + cdLeft + ' 天才重新掃描';
+    } else if (intent === 'HOLD_CASH') {
+      if (distEntry != null && distEntry > 0) {
+        nextAction = 'score ' + score.toFixed(3) + '，距買入門檻 ' + buyThr.toFixed(2) + ' 還差 ' + (distEntry * 100).toFixed(1) + ' 分';
+      } else {
+        nextAction = '空手等待，score ' + score.toFixed(3) + '，門檻 ' + buyThr.toFixed(2);
+      }
+    }
 
-    let helper = txt(st.reason || '');
-    if (!helper && intent === 'HOLD_POS' && stop > 0) helper = '若跌破 $' + fmtMoney(stop, 2) + '，AI 會偏向改成減碼或賣出。';
-    if (!helper && intent === 'ADD' && stop > 0) helper = '若續強可再加碼；若失守 $' + fmtMoney(stop, 2) + ' 先停手。';
-    if (!helper && intent === 'BUY' && stop > 0) helper = '進場後可用 $' + fmtMoney(stop, 2) + ' 當風險線。';
-    if (!helper && intent === 'TRIM') helper = '先減碼，再觀察是否保留核心倉。';
-    if (!helper && intent === 'SELL') helper = '策略重視風險控制，等待重新轉強再回來。';
-    if (!helper && intent === 'COOLDOWN') helper = '目前先不要急著回補，讓訊號重新整理。';
-    if (!helper && intent === 'HOLD_CASH') helper = '等待突破、分數與市場條件同時轉強。';
+    // ── progress：持倉狀況 + 市場脈絡 ────────────────────────────────
+    let progress = '';
+    const pnlStr  = pnlPct !== 0 ? (pnlPct > 0 ? '+' : '') + fmtMoney(pnlPct, 1) + '%' : '';
+    const heldStr = daysHeld > 0 ? '持有 ' + daysHeld + ' 天' : '';
+
+    if (actualHasPos && !expectedHasPos) {
+      progress = trusted
+        ? '你仍持有，但回測邏輯此時偏向空手' + (regimeLabel ? '（' + regimeLabel + '）' : '') + '。'
+        : '本地推估偏向空手，建議再確認一次。';
+    } else if (!actualHasPos && expectedHasPos) {
+      progress = 'AI 認為可持有（' + regimeLabel + '），你目前空手，可等待合適進場點。';
+    } else if (actualHasPos && intent === 'SELL') {
+      progress = (pnlStr ? '目前損益 ' + pnlStr + '，' : '') +
+        (stop > 0 ? '已進入出場邏輯，風險線 $' + fmtMoney(stop, 2) + '。' : '訊號轉弱，偏向先出場控制風險。');
+    } else if (actualHasPos && intent === 'TRIM') {
+      progress = (pnlStr ? '損益 ' + pnlStr + '，' : '') +
+        'AI 預計減碼 ' + trimPct + '%，保留觀察部位' + (topicHold ? '（話題動能守倉）' : '') + '。';
+    } else if (distStop != null && distStop < 0) {
+      progress = '現價已低於停損線 ' + fmtMoney(Math.abs(distStop), 1) + '%，建議優先檢查是否執行停損。';
+    } else if (distStop != null && distStop <= 2.5) {
+      progress = '距停損線僅剩 ' + fmtMoney(distStop, 1) + '%，高度警戒，隨時可能觸發出場。';
+    } else if (actualHasPos) {
+      const parts = [];
+      if (pnlStr) parts.push('損益 ' + pnlStr);
+      if (heldStr) parts.push(heldStr);
+      if (distStop != null) parts.push('距停損 ' + fmtMoney(distStop, 1) + '%');
+      if (regimeLabel) parts.push(regimeLabel);
+      progress = parts.join(' · ') + '。';
+    } else if (!actualHasPos && !expectedHasPos) {
+      progress = '目前空手，符合 AI 等待條件' + (regimeLabel ? '（' + regimeLabel + '）' : '') + '。';
+    } else {
+      progress = '目前維持觀察。';
+    }
+
+    // ── helper：RSI / 牛熊 / 話題細節 ────────────────────────────────
+    const helperParts = [];
+
+    // RSI
+    if (rsi >= 78)      helperParts.push('⚠️ RSI ' + rsi.toFixed(0) + ' 過熱，有獲利者考慮分批減碼');
+    else if (rsi >= 68) helperParts.push('RSI ' + rsi.toFixed(0) + '，偏熱，留意反轉風險');
+    else if (rsi <= 30) helperParts.push('RSI ' + rsi.toFixed(0) + '，超賣區，反彈機率增加');
+    else if (rsi > 0)   helperParts.push('RSI ' + rsi.toFixed(0) + '，正常區間');
+
+    // 牛熊指數
+    if      (bbIdx <= -55) helperParts.push('🚨 牛熊指數 ' + bbIdx + '（恐慌），注意全出風險');
+    else if (bbIdx <= -20) helperParts.push('牛熊指數 ' + bbIdx + '，偏空');
+    else if (bbIdx >= 60)  helperParts.push('牛熊指數 ' + bbIdx + '，極度偏牛');
+    else if (bbIdx >= 20)  helperParts.push('牛熊指數 ' + bbIdx + '，偏牛');
+    else                   helperParts.push('牛熊指數 ' + bbIdx + '，中性');
+
+    // 話題動能
+    if (topicLv >= 4 && topicHold) helperParts.push('話題 ' + topicLv + '/5 強，可守倉' + (topic.reason ? '：' + topic.reason : ''));
+    else if (topicLv >= 3)         helperParts.push('話題 ' + topicLv + '/5' + (topic.reason ? '：' + topic.reason : ''));
+    else if (topicLv > 0)          helperParts.push('話題 ' + topicLv + '/5，敘事偏弱');
+
+    // 進場條件補充（空手時）
+    if (!actualHasPos && intent === 'HOLD_CASH' && mktLevel <= 2) {
+      helperParts.push('市場大環境偏空（level ' + mktLevel + '），暫停新倉');
+    }
+    if (!actualHasPos && intent === 'HOLD_CASH' && distEntry != null && distEntry > 0) {
+      helperParts.push('需 score 升至 ' + buyThr.toFixed(3) + ' 才考慮進場');
+    }
+
+    // 停損補充（持倉時）
+    if (actualHasPos && stop > 0 && peak > 0 && price > 0) {
+      const pullback = (1 - price / peak) * 100;
+      if (pullback > 5) helperParts.push('從波段高點回撤 ' + fmtMoney(pullback, 1) + '%');
+    }
+
+    const helper = helperParts.length > 0 ? helperParts.join('　·　') : (txt(st.reason || ''));
 
     return {
-      ticker: txt(st.ticker || snapshot && snapshot.ticker || actualPos && actualPos.ticker || ''),
-      source: source || 'ai',
-      routeUsed: routeUsed,
-      trusted: trusted,
-      statusLabel: statusLabel,
-      statusCls: statusCls,
-      intent: intent,
+      ticker:     txt(st.ticker || (snapshot && snapshot.ticker) || (actualPos && actualPos.ticker) || ''),
+      source:     source || 'ai',
+      routeUsed:  routeUsed,
+      trusted:    trusted,
+      statusLabel:statusLabel,
+      statusCls:  statusCls,
+      intent:     intent,
       nextAction: nextAction,
-      progress: progress,
-      helper: helper,
-      price: price,
-      stopPrice: stop,
-      topicScore: topic.score_5,
+      progress:   progress,
+      helper:     helper,
+      price:      price,
+      stopPrice:  stop,
+      topicScore: topicLv,
       topicLabel: topic.label,
-      market: marketContextFrom(st.market_context || {}),
-      metrics: snapshot && snapshot.metrics ? snapshot.metrics : {alpha:0,win_rate:0,total_trades:0},
+      market:     marketContextFrom(st.market_context || {}),
+      metrics:    (snapshot && snapshot.metrics) ? snapshot.metrics : {alpha:0,win_rate:0,total_trades:0},
+      score:      score,
+      rsi:        rsi,
+      bbIdx:      bbIdx,
+      buyThr:     buyThr,
+      sellThr:    sellThr,
+      regime:     regime,
+      regimeLabel:regimeLabel,
+      daysHeld:   daysHeld,
+      pnlPct:     pnlPct,
     };
   }
 
@@ -2528,6 +2639,11 @@ if('serviceWorker' in navigator)navigator.serviceWorker.register('data:text/java
   }
 
   function miniPlanHtml(summary){
+    const rsiStr  = summary.rsi  > 0  ? 'RSI ' + summary.rsi.toFixed(0) : '';
+    const bbStr   = summary.bbIdx !== undefined ? (summary.bbIdx >= 0 ? '+' : '') + summary.bbIdx : '';
+    const scoreStr= summary.score > 0 ? summary.score.toFixed(3) : '';
+    const metaRow = [scoreStr ? 'score ' + scoreStr : '', rsiStr, bbStr ? 'bb ' + bbStr : '']
+                      .filter(Boolean).join('  ·  ');
     return ''+
       '<div class="plan-mini">' +
         '<div class="plan-row">' +
@@ -2539,8 +2655,10 @@ if('serviceWorker' in navigator)navigator.serviceWorker.register('data:text/java
           '</div>' +
           (summary.stopPrice > 0 ? '<div class="plan-kv">守 $'+fmtMoney(summary.stopPrice, 2)+'</div>' : '<div class="plan-kv">'+esc(summary.market.label)+'</div>') +
         '</div>' +
+        (metaRow ? '<div class="plan-line" style="color:var(--text2);font-size:11px">'+esc(metaRow)+'</div>' : '') +
         '<div class="plan-line"><strong>AI 下一步：</strong>'+esc(summary.nextAction)+'</div>' +
         '<div class="plan-line">'+esc(summary.progress)+'</div>' +
+        (summary.helper ? '<div class="plan-line" style="color:var(--text2);font-size:11px;margin-top:2px">'+esc(summary.helper)+'</div>' : '') +
       '</div>';
   }
 
@@ -2586,12 +2704,25 @@ if('serviceWorker' in navigator)navigator.serviceWorker.register('data:text/java
   }
 
   function detailPlanHtml(summary){
+    const scoreCell  = summary.score > 0 ? summary.score.toFixed(3) + ' / ' + summary.buyThr.toFixed(2) : '—';
+    const rsiCell    = summary.rsi  > 0 ? summary.rsi.toFixed(0) + (summary.rsi >= 78 ? ' ⚠️' : summary.rsi <= 30 ? ' 超賣' : '') : '—';
+    const bbCell     = summary.bbIdx !== undefined ? (summary.bbIdx >= 0 ? '+' : '') + summary.bbIdx + ' ' + esc(summary.market.label) : '—';
+    const regimeCell = esc(summary.regimeLabel || summary.regime || '—');
     return ''+
       '<div class="plan-detail-card" id="aiNextStepCard">' +
         '<div class="fb"><div><div style="font-size:10px;color:var(--text2)">AI 預計下一步 / 計畫檢查</div><div class="plan-chip-row" style="margin-top:6px">'+intentChip(summary.intent)+'<span class="plan-status '+summary.statusCls+'">'+esc(summary.statusLabel)+'</span>'+routeChip(summary.routeUsed)+(summary.topicScore ? '<span class="pl '+(summary.topicScore >= 4 ? 'pl-b' : (summary.topicScore >= 3 ? 'pl-h' : 'pl-s'))+'">話題 '+esc(summary.topicScore)+'/5</span>' : '')+'</div></div><span class="pl-mk">'+esc(summary.source === 'ibkr' ? 'IBKR' : 'PAPER')+'</span></div>' +
-        '<div style="font-size:16px;font-weight:800;letter-spacing:-.2px;margin-top:12px">'+esc(summary.nextAction)+'</div>' +
+        '<div style="font-size:16px;font-weight:500;letter-spacing:-.2px;margin-top:12px">'+esc(summary.nextAction)+'</div>' +
         '<div style="font-size:12px;color:var(--text2);line-height:1.75;margin-top:8px">'+esc(summary.progress)+'</div>' +
-        '<div class="plan-g3"><div class="plan-metric"><div style="font-size:10px;color:var(--text2)">停損線</div><div class="v">'+(summary.stopPrice > 0 ? ('$'+fmtMoney(summary.stopPrice, 2)) : '- ')+'</div></div><div class="plan-metric"><div style="font-size:10px;color:var(--text2)">市場</div><div class="v">'+esc(summary.market.label)+' '+(summary.market.index > 0 ? '+' : '')+esc(summary.market.index)+'</div></div><div class="plan-metric"><div style="font-size:10px;color:var(--text2)">同步來源</div><div class="v">'+esc(routeLabel(summary.routeUsed))+'</div></div></div>' +
+        '<div class="plan-g3" style="margin-top:14px">' +
+          '<div class="plan-metric"><div style="font-size:10px;color:var(--text2)">score / 門檻</div><div class="v">'+scoreCell+'</div></div>' +
+          '<div class="plan-metric"><div style="font-size:10px;color:var(--text2)">RSI</div><div class="v">'+rsiCell+'</div></div>' +
+          '<div class="plan-metric"><div style="font-size:10px;color:var(--text2)">牛熊 / 市場</div><div class="v">'+bbCell+'</div></div>' +
+        '</div>' +
+        '<div class="plan-g3">' +
+          '<div class="plan-metric"><div style="font-size:10px;color:var(--text2)">停損線</div><div class="v">'+(summary.stopPrice > 0 ? ('$'+fmtMoney(summary.stopPrice, 2)) : '— ')+'</div></div>' +
+          '<div class="plan-metric"><div style="font-size:10px;color:var(--text2)">市況</div><div class="v">'+regimeCell+'</div></div>' +
+          '<div class="plan-metric"><div style="font-size:10px;color:var(--text2)">同步來源</div><div class="v">'+esc(routeLabel(summary.routeUsed))+'</div></div>' +
+        '</div>' +
         '<div class="plan-note">'+esc(summary.helper)+'</div>' +
       '</div>';
   }
