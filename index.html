@@ -4359,5 +4359,399 @@ if('serviceWorker' in navigator)navigator.serviceWorker.register('data:text/java
 </script>
 <!-- NEWS UI BILINGUAL + SNAPSHOT FIX INLINE PATCH END -->
 
+
+
+<!-- AUTO TRADE REMOTE SETTINGS + RUNTIME PERSIST INLINE PATCH START -->
+<script id="auto-trade-remote-inline">
+(function(){
+  if (window.__AI_TRADER_AUTO_TRADE_REMOTE__) return;
+  window.__AI_TRADER_AUTO_TRADE_REMOTE__ = true;
+
+  const UI = {
+    settings: null,
+    schema: null,
+    state: null,
+    draft: null,
+    loading: false,
+    error: '',
+    authRequired: false,
+    lastLoadTs: 0,
+    lastRun: null,
+  };
+  const TTL = 60000;
+
+  function ensureStyle(){
+    if (document.getElementById('auto-trade-remote-style')) return;
+    const st = document.createElement('style');
+    st.id = 'auto-trade-remote-style';
+    st.textContent = '' +
+      '.at-remote-card{margin-top:12px}' +
+      '.at-remote-help{font-size:11px;color:var(--text2);line-height:1.7;margin-top:8px}' +
+      '.at-remote-chip{display:inline-flex;align-items:center;justify-content:center;padding:3px 9px;border-radius:999px;font-size:10px;font-weight:800}' +
+      '.at-remote-ok{background:rgba(52,199,89,.15);color:var(--green)}' +
+      '.at-remote-warn{background:rgba(255,149,0,.15);color:var(--orange)}' +
+      '.at-remote-bad{background:rgba(255,59,48,.15);color:var(--red)}' +
+      '.at-remote-neutral{background:rgba(142,142,147,.15);color:var(--text2)}' +
+      '.at-remote-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}' +
+      '.at-remote-grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px}' +
+      '.at-remote-box{background:var(--card2);border-radius:12px;padding:12px;border:.5px solid var(--border)}' +
+      '.at-remote-box .lb{font-size:10px;color:var(--text2)}' +
+      '.at-remote-box .vl{font-size:16px;font-weight:700;margin-top:4px}' +
+      '.at-remote-select{background:var(--card2);border:.5px solid var(--border);border-radius:10px;color:#fff;padding:10px 14px;font-size:15px;width:100%;outline:none}' +
+      '.at-remote-note{font-size:10px;color:var(--text2);line-height:1.6;margin-top:6px}' +
+      '.at-remote-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}' +
+      '.at-remote-full{grid-column:1 / -1}' +
+      '.at-remote-auth{background:rgba(10,132,255,.08);border:1px solid rgba(10,132,255,.18);border-radius:12px;padding:12px;margin-top:10px}' +
+      '.at-remote-inline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}' +
+      '.at-remote-divider{height:1px;background:var(--border);margin:12px 0}' +
+      '@media (max-width:430px){.at-remote-grid3{grid-template-columns:1fr 1fr}}';
+    document.head.appendChild(st);
+  }
+
+  function hasApi(){
+    try { return /^https?:\/\//i.test((window.aB ? window.aB() : '') || ''); } catch(e){ return false; }
+  }
+  function activeTab(){ return Number((window.S && window.S.tab) || 0); }
+  function txt(v){ return v == null ? '' : String(v); }
+  function num(v, d){ const n = Number(v); return Number.isFinite(n) ? n : (d === undefined ? 0 : d); }
+  function esc(v){ return txt(v).replace(/[&<>"']/g, function(ch){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch] || ch; }); }
+  function money(v){ try{ return '$' + Number(v || 0).toLocaleString('en-US', {maximumFractionDigits:0}); }catch(e){ return '$' + (Number(v || 0).toFixed(0)); } }
+  function fixed(v, d){ const n = Number(v || 0); return Number.isFinite(n) ? n.toFixed(d === undefined ? 2 : d) : '0.00'; }
+  function tsFmt(v){ if(!v) return '-'; try{ const d = new Date(typeof v === 'number' ? v * 1000 : v); if(isNaN(d.getTime())) return '-'; return d.toLocaleString('zh-TW',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}); }catch(e){ return '-'; } }
+  function stateChip(ok, label){ return '<span class="at-remote-chip ' + (ok ? 'at-remote-ok' : 'at-remote-warn') + '">' + esc(label) + '</span>'; }
+  function maybeOpenLogin(){ if (typeof window.openAuthSyncModal === 'function') window.openAuthSyncModal('login'); }
+
+  function apiHeaders(extra){
+    let h = {Accept:'application/json'};
+    try{ if(typeof window.aHd === 'function') h = Object.assign({}, window.aHd()); }catch(e){}
+    h.Accept = 'application/json';
+    return Object.assign(h, extra || {});
+  }
+
+  async function apiJson(method, path, body){
+    const base = window.aB ? window.aB() : '';
+    if(!/^https?:\/\//i.test(base || '')) throw Object.assign(new Error('請先設定 API Base URL'), {status:0});
+    const headers = apiHeaders();
+    const opt = {method: method || 'GET', mode:'cors', cache:'no-store', headers:headers};
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      opt.body = JSON.stringify(body);
+    }
+    const rsp = await fetch(base + path, opt);
+    const ct = (rsp.headers.get('content-type') || '').toLowerCase();
+    let data = {};
+    if (ct.includes('application/json')) data = await rsp.json();
+    else {
+      const raw = (await rsp.text()).slice(0, 260);
+      const err = new Error(raw || ('http_' + rsp.status));
+      err.status = rsp.status; err.data = {ok:false, message: raw};
+      throw err;
+    }
+    if (!rsp.ok || (data && data.ok === false)) {
+      const err = new Error((data && (data.message || data.error)) || ('http_' + rsp.status));
+      err.status = rsp.status; err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  function defaultSettings(){
+    const st = (window.S && window.S.st) || {};
+    return {
+      enabled: false,
+      max_positions: Math.max(1, num(st.mp, 5) || 5),
+      budget_pct: Math.max(0, num(st.abp, 6) || 6),
+      ibkr_total_budget: Math.max(0, num(st.ibkr_total_budget != null ? st.ibkr_total_budget : st.ibkrTotalBudget, 0) || 0),
+      ibkr_position_cap: Math.max(0, num(st.ibkr_position_cap != null ? st.ibkr_position_cap : st.ibkrPositionCap, 0) || 0),
+      buy_threshold: num(st.bth, 0.58) || 0.58,
+      sell_threshold: num(st.sth, 0.44) || 0.44,
+      scan_sector: txt(st.scSec || 'all') || 'all',
+      scan_limit: Math.max(5, num(st.scLim, 20) || 20),
+      order_type: txt(st.order_type || st.orderType || 'MKT') || 'MKT'
+    };
+  }
+
+  function mergedSettings(){
+    return Object.assign({}, defaultSettings(), UI.settings || {}, UI.draft || {});
+  }
+
+  function authHint(err){
+    const msg = txt(err && (err.message || err));
+    const st = Number(err && err.status || 0);
+    return st === 401 || /unauthorized|請先登入|登入/i.test(msg);
+  }
+
+  function applySettingsResponse(data){
+    UI.settings = Object.assign({}, defaultSettings(), data && data.settings || {});
+    UI.schema = data && data.schema || UI.schema || null;
+    UI.authRequired = false;
+    UI.error = '';
+    UI.lastLoadTs = Date.now();
+  }
+
+  async function loadRemote(force){
+    if (!hasApi()) return null;
+    if (!force && UI.settings && Date.now() - UI.lastLoadTs < TTL) return UI.settings;
+    UI.loading = true; UI.error = '';
+    try{
+      const [settingsData, stateData] = await Promise.all([
+        apiJson('GET', '/api/auto-trade/settings'),
+        apiJson('GET', '/api/auto-trade/state')
+      ]);
+      applySettingsResponse(settingsData || {});
+      UI.state = stateData || null;
+      return UI.settings;
+    }catch(e){
+      UI.error = txt((e && e.message) || e) || '讀取失敗';
+      UI.authRequired = authHint(e);
+      return null;
+    }finally{
+      UI.loading = false;
+    }
+  }
+
+  async function refreshStateOnly(force){
+    if (!hasApi()) return null;
+    if (!force && UI.state && Date.now() - UI.lastLoadTs < TTL) return UI.state;
+    try{
+      UI.state = await apiJson('GET', '/api/auto-trade/state');
+      UI.authRequired = false;
+      UI.error = '';
+      UI.lastLoadTs = Date.now();
+      return UI.state;
+    }catch(e){
+      UI.error = txt((e && e.message) || e) || '狀態讀取失敗';
+      UI.authRequired = authHint(e);
+      return null;
+    }
+  }
+
+  function currentPayload(){
+    const s = mergedSettings();
+    return {
+      enabled: !!s.enabled,
+      max_positions: Math.max(1, Math.round(num(s.max_positions, 5) || 5)),
+      budget_pct: Math.max(0, num(s.budget_pct, 6) || 0),
+      ibkr_total_budget: Math.max(0, num(s.ibkr_total_budget, 0) || 0),
+      ibkr_position_cap: Math.max(0, num(s.ibkr_position_cap, 0) || 0),
+      buy_threshold: Math.max(0, Math.min(1, num(s.buy_threshold, 0.58) || 0.58)),
+      sell_threshold: Math.max(0, Math.min(1, num(s.sell_threshold, 0.44) || 0.44)),
+      scan_sector: txt(s.scan_sector || 'all') || 'all',
+      scan_limit: Math.max(5, Math.round(num(s.scan_limit, 20) || 20)),
+      order_type: txt(s.order_type || 'MKT').toUpperCase() === 'LMT' ? 'LMT' : 'MKT'
+    };
+  }
+
+  window.atUiSet = function(key, raw){
+    const draft = Object.assign({}, mergedSettings());
+    if (key === 'enabled') draft.enabled = !!raw;
+    else if (key === 'max_positions' || key === 'scan_limit') draft[key] = Math.round(num(raw, draft[key] || 0));
+    else if (key === 'budget_pct' || key === 'ibkr_total_budget' || key === 'ibkr_position_cap') draft[key] = Math.max(0, num(raw, draft[key] || 0));
+    else if (key === 'buy_threshold' || key === 'sell_threshold') draft[key] = Math.max(0, Math.min(1, num(raw, draft[key] || 0)));
+    else draft[key] = txt(raw || '');
+    UI.draft = draft;
+  };
+
+  window.atUiToggleEnabled = function(){
+    const draft = Object.assign({}, mergedSettings());
+    draft.enabled = !draft.enabled;
+    UI.draft = draft;
+    renderRemoteCard();
+  };
+
+  window.atUiLoad = async function(force){
+    await loadRemote(!!force);
+    renderRemoteCard();
+    if (UI.error && typeof window.ts === 'function') window.ts(UI.error, 'error');
+  };
+
+  window.atUiSave = async function(){
+    if (!hasApi()) { if (typeof window.ts === 'function') window.ts('請先設定 API Base URL', 'error'); return; }
+    try{
+      UI.loading = true; renderRemoteCard();
+      const data = await apiJson('PUT', '/api/auto-trade/settings', currentPayload());
+      applySettingsResponse(data || {});
+      UI.draft = null;
+      UI.state = await apiJson('GET', '/api/auto-trade/state');
+      UI.lastRun = null;
+      if (typeof window.ts === 'function') window.ts('已儲存後端自動交易設定', 'success');
+    }catch(e){
+      UI.error = txt((e && e.message) || e) || '儲存失敗';
+      UI.authRequired = authHint(e);
+      if (typeof window.ts === 'function') window.ts(UI.error, 'error');
+      if (UI.authRequired) maybeOpenLogin();
+    }finally{
+      UI.loading = false;
+      renderRemoteCard();
+    }
+  };
+
+  window.atUiRun = async function(saveFirst){
+    if (!hasApi()) { if (typeof window.ts === 'function') window.ts('請先設定 API Base URL', 'error'); return; }
+    const payload = currentPayload();
+    if (saveFirst) payload.save_settings = true;
+    try{
+      UI.loading = true; renderRemoteCard();
+      UI.lastRun = await apiJson('POST', '/api/auto-trade', payload);
+      if (saveFirst) {
+        UI.settings = Object.assign({}, payload);
+        UI.draft = null;
+      }
+      try{ UI.state = await apiJson('GET', '/api/auto-trade/state'); }catch(_e){}
+      const msg = UI.lastRun && UI.lastRun.fail_closed ? ('已擋下：' + txt(UI.lastRun.message || UI.lastRun.error || 'fail_closed')) : ('已手動觸發，動作 ' + num(UI.lastRun && UI.lastRun.action_count, 0) + ' 筆');
+      if (typeof window.ts === 'function') window.ts(msg, UI.lastRun && UI.lastRun.fail_closed ? 'error' : 'success');
+    }catch(e){
+      UI.error = txt((e && e.message) || e) || '執行失敗';
+      UI.authRequired = authHint(e);
+      if (typeof window.ts === 'function') window.ts(UI.error, 'error');
+      if (UI.authRequired) maybeOpenLogin();
+    }finally{
+      UI.loading = false;
+      renderRemoteCard();
+    }
+  };
+
+  window.atUiResetRuntime = async function(){
+    if (!hasApi()) { if (typeof window.ts === 'function') window.ts('請先設定 API Base URL', 'error'); return; }
+    if (!confirm('要清空後端 runtime state 嗎？這會清掉 peak / stop / trim / cooldown / pending reservation。')) return;
+    try{
+      UI.loading = true; renderRemoteCard();
+      const data = await apiJson('POST', '/api/auto-trade/state/reset', {});
+      UI.state = data && data.state ? data.state : null;
+      UI.lastRun = null;
+      if (typeof window.ts === 'function') window.ts('已清空後端 runtime state', 'success');
+    }catch(e){
+      UI.error = txt((e && e.message) || e) || '清空失敗';
+      UI.authRequired = authHint(e);
+      if (typeof window.ts === 'function') window.ts(UI.error, 'error');
+      if (UI.authRequired) maybeOpenLogin();
+    }finally{
+      UI.loading = false;
+      renderRemoteCard();
+    }
+  };
+
+  function scopeOptionsHtml(value){
+    let rows = [];
+    try{ if (typeof window.secList === 'function') rows = window.secList() || []; }catch(e){}
+    if (!Array.isArray(rows) || !rows.length) rows = [{key:'all', label:'全部'}];
+    return '<select class="at-remote-select" onchange="atUiSet(\'scan_sector\', this.value)">' + rows.map(function(it){
+      const key = txt(it && it.key || 'all') || 'all';
+      const label = txt(it && it.label || key) || key;
+      return '<option value="' + esc(key) + '"' + (txt(value) === key ? ' selected' : '') + '>' + esc(label) + '</option>';
+    }).join('') + '</select>';
+  }
+
+  function previewBoxHtml(preview){
+    const remaining = num(preview && preview.remaining_budget, 0);
+    const total = num(preview && preview.total_budget, 0);
+    const cap = num(preview && (preview.effective_position_cap != null ? preview.effective_position_cap : preview.ibkr_position_cap), 0);
+    const availSlots = num(preview && preview.available_slots, 0);
+    const msg = txt(preview && preview.message || (total > 0 ? ('剩餘可投入 ' + money(remaining)) : '尚未取得預覽'));
+    return '<div class="at-remote-box"><div class="lb">投入限制預覽</div><div class="vl">' + esc(msg) + '</div><div class="at-remote-note">總投入 ' + money(total) + ' · 單檔上限 ' + money(cap) + ' · 可用名額 ' + esc(availSlots) + '</div></div>';
+  }
+
+  function runtimeBoxHtml(state){
+    const persistence = state && state.persistence || {};
+    const runtime = [
+      ['live state', num(state && state.state_count, 0)],
+      ['pending buy', num(state && state.pending_buy_reservation_count, 0)],
+      ['cooldown', num(state && state.cooldown_count, 0)],
+      ['order guard', num(state && state.recent_order_guard_count, 0)]
+    ];
+    const ms = state && state.market_session || {};
+    const lock = state && state.lock_state || {};
+    const open = !!ms.is_open;
+    const lockBusy = !!lock.locked;
+    let note = '市場 ' + (open ? '開盤中' : '未開盤');
+    if (txt(ms.reason)) note += ' · ' + txt(ms.reason);
+    note += ' · runtime ' + (persistence.enabled ? 'sqlite' : 'memory');
+    if (txt(persistence.db_file)) note += ' (' + txt(persistence.db_file) + ')';
+    return '<div class="at-remote-box"><div class="fb"><div><div class="lb">後端 runtime 狀態</div><div class="vl">' + (lockBusy ? '<span class="at-remote-chip at-remote-warn">cycle busy</span>' : '<span class="at-remote-chip at-remote-ok">idle</span>') + ' ' + (open ? '<span class="at-remote-chip at-remote-ok">market open</span>' : '<span class="at-remote-chip at-remote-warn">market closed</span>') + '</div></div><div class="lb">loaded ' + esc(tsFmt(persistence.loaded_at || state && state.runtime_bootstrap && state.runtime_bootstrap.loaded_at || 0)) + '</div></div><div class="at-remote-grid3">' + runtime.map(function(row){ return '<div class="at-remote-box" style="padding:10px"><div class="lb">' + esc(row[0]) + '</div><div class="vl">' + esc(row[1]) + '</div></div>'; }).join('') + '</div><div class="at-remote-note">' + esc(note) + '</div></div>';
+  }
+
+  function lastRunHtml(run){
+    if (!run) return '';
+    const fail = !!run.fail_closed;
+    const lines = [];
+    if (txt(run.message)) lines.push(txt(run.message));
+    if (run.skip_reason) lines.push('skip: ' + txt(run.skip_reason));
+    lines.push('actions ' + num(run.action_count, 0) + ' / cash ' + money(run.cash_available_estimate || run.cash || 0));
+    return '<div class="at-remote-box"><div class="fb"><div><div class="lb">最近一次手動觸發</div><div class="vl" style="color:' + (fail ? 'var(--red)' : 'var(--green)') + '">' + esc(fail ? 'FAIL-CLOSED' : 'DONE') + '</div></div><span class="at-remote-chip ' + (fail ? 'at-remote-bad' : 'at-remote-ok') + '">' + esc(tsFmt(Date.now() / 1000)) + '</span></div><div class="at-remote-note">' + esc(lines.join(' · ')) + '</div></div>';
+  }
+
+  function renderRemoteCard(){
+    ensureStyle();
+    const t3 = document.getElementById('t3');
+    if (!t3) return;
+    const old = document.getElementById('autoTradeRemoteWrap');
+    if (old) old.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'autoTradeRemoteWrap';
+    const s = mergedSettings();
+    const state = UI.state || {};
+    const preview = (state && state.allocation_preview) || null;
+    const scheduler = state && state.configured_limits || {};
+    const overrideActive = !!(state && state.config_override_active);
+    const sess = state && state.market_session || {};
+    const loginHint = UI.authRequired ? '<div class="at-remote-auth"><div style="font-size:13px;font-weight:700">這區需要登入後端帳號</div><div class="at-remote-help" style="margin-top:6px">/api/auto-trade/settings 與 /api/auto-trade/state 都屬於敏感交易路由。先登入後，前端才能讀寫 IBKR 自動交易設定。</div><div class="at-remote-actions"><button class="bs" style="background:var(--blue);padding:10px 14px" onclick="openAuthSyncModal(\'login\')">登入帳號</button><button class="bs" style="background:var(--card2);padding:10px 14px" onclick="atUiLoad(true)">重新檢查</button></div></div>' : '';
+    const runtimeNote = overrideActive ? '<div class="at-remote-auth" style="margin-top:10px"><div style="font-size:13px;font-weight:700;color:var(--orange)">目前 scheduler 正在吃 config.json override</div><div class="at-remote-help" style="margin-top:6px">你仍可儲存使用者設定與手動觸發，但背景排程會優先採用 config 內的 auto_trade.enabled 設定。</div></div>' : '';
+    wrap.innerHTML = '' +
+      '<div class="st">IBKR 自動交易（後端）</div>' +
+      '<div class="cd at-remote-card">' +
+        '<div class="fb" style="gap:12px;align-items:flex-start"><div><div style="font-size:15px;font-weight:700">直接讀寫 /api/auto-trade/settings</div><div class="at-remote-help">這裡才是實際控制 IBKR 後端自動交易的設定；上面的「模擬控制」仍屬於本地 AI Trader 模擬。</div></div><div class="at-remote-inline">' +
+          (UI.loading ? '<span class="at-remote-chip at-remote-neutral">載入中</span>' : stateChip(hasApi(), hasApi() ? 'API Ready' : 'No API')) +
+          (sess && Object.keys(sess).length ? (sess.is_open ? '<span class="at-remote-chip at-remote-ok">美股開盤</span>' : '<span class="at-remote-chip at-remote-warn">美股休市</span>') : '') +
+          (state && state.persistence ? '<span class="at-remote-chip ' + (state.persistence.enabled ? 'at-remote-ok' : 'at-remote-neutral') + '">' + esc(state.persistence.enabled ? 'runtime sqlite' : 'runtime memory') + '</span>' : '') +
+        '</div></div>' +
+        (UI.error && !UI.authRequired ? '<div class="at-remote-auth" style="margin-top:10px"><div style="font-size:12px;color:var(--red)">' + esc(UI.error) + '</div></div>' : '') +
+        loginHint + runtimeNote +
+        '<div class="at-remote-divider"></div>' +
+        '<div class="fb" style="margin-bottom:10px"><span style="font-size:14px">啟用背景排程</span><button class="tg" style="background:' + (s.enabled ? 'var(--green)' : 'var(--text3)') + '" onclick="atUiToggleEnabled()"><div class="tg-k" style="left:' + (s.enabled ? '22px' : '2px') + '"></div></button></div>' +
+        '<div class="at-remote-grid">' +
+          '<div class="at-remote-box"><div class="lb">最大持倉檔數</div><input class="ip" type="number" value="' + esc(Math.max(1, num(s.max_positions, 5))) + '" min="1" max="50" style="margin-top:8px;text-align:right" onchange="atUiSet(\'max_positions\', this.value)"></div>' +
+          '<div class="at-remote-box"><div class="lb">每輪投入比例 (%)</div><input class="ip" type="number" value="' + esc(fixed(s.budget_pct, 1)) + '" min="0" max="100" step="0.1" style="margin-top:8px;text-align:right" onchange="atUiSet(\'budget_pct\', this.value)"></div>' +
+          '<div class="at-remote-box"><div class="lb">IBKR 自定投入總金額</div><input class="ip" type="number" value="' + esc(num(s.ibkr_total_budget, 0)) + '" min="0" step="100" style="margin-top:8px;text-align:right" onchange="atUiSet(\'ibkr_total_budget\', this.value)"><div class="at-remote-note">限制持倉市值 + working BUY + pending reservation</div></div>' +
+          '<div class="at-remote-box"><div class="lb">單檔投入上限</div><input class="ip" type="number" value="' + esc(num(s.ibkr_position_cap, 0)) + '" min="0" step="100" style="margin-top:8px;text-align:right" onchange="atUiSet(\'ibkr_position_cap\', this.value)"><div class="at-remote-note">留 0 代表自動用 總投入 / 最大持倉</div></div>' +
+          '<div class="at-remote-box"><div class="lb">買入門檻</div><input class="ip" type="number" value="' + esc(fixed(s.buy_threshold, 2)) + '" min="0" max="1" step="0.01" style="margin-top:8px;text-align:right" onchange="atUiSet(\'buy_threshold\', this.value)"></div>' +
+          '<div class="at-remote-box"><div class="lb">賣出門檻</div><input class="ip" type="number" value="' + esc(fixed(s.sell_threshold, 2)) + '" min="0" max="1" step="0.01" style="margin-top:8px;text-align:right" onchange="atUiSet(\'sell_threshold\', this.value)"></div>' +
+          '<div class="at-remote-box"><div class="lb">掃描產業</div>' + scopeOptionsHtml(s.scan_sector) + '</div>' +
+          '<div class="at-remote-box"><div class="lb">掃描數量 / 訂單型態</div><div class="at-remote-inline" style="margin-top:8px"><input class="ip" type="number" value="' + esc(Math.max(5, num(s.scan_limit, 20))) + '" min="5" max="100" style="flex:1;text-align:right" onchange="atUiSet(\'scan_limit\', this.value)"><select class="at-remote-select" style="width:110px" onchange="atUiSet(\'order_type\', this.value)"><option value="MKT"' + (txt(s.order_type).toUpperCase() === 'MKT' ? ' selected' : '') + '>MKT</option><option value="LMT"' + (txt(s.order_type).toUpperCase() === 'LMT' ? ' selected' : '') + '>LMT</option></select></div></div>' +
+        '</div>' +
+        '<div class="at-remote-actions">' +
+          '<button class="bs" style="background:var(--blue);padding:10px 14px" onclick="atUiSave()">儲存到後端</button>' +
+          '<button class="bs" style="background:var(--green);padding:10px 14px" onclick="atUiRun(true)">儲存並跑一次</button>' +
+          '<button class="bs" style="background:var(--card2);padding:10px 14px" onclick="atUiLoad(true)">重新讀取</button>' +
+          '<button class="bs" style="background:var(--orange);padding:10px 14px" onclick="atUiResetRuntime()">清空 runtime</button>' +
+        '</div>' +
+        '<div class="at-remote-actions" style="margin-top:8px"><button class="bs at-remote-full" style="background:var(--card2);padding:10px 14px" onclick="atUiRun(false)">不儲存，直接手動執行本次表單</button></div>' +
+        '<div class="at-remote-grid" style="margin-top:12px">' +
+          previewBoxHtml(preview || scheduler || {}) + runtimeBoxHtml(state || {}) +
+        '</div>' +
+        lastRunHtml(UI.lastRun) +
+        (scheduler && scheduler.source ? '<div class="at-remote-help">scheduler 目前來源：' + esc(txt(scheduler.source || 'state')) + (scheduler.enabled ? ' / enabled' : ' / disabled') + '</div>' : '') +
+      '</div>';
+    t3.appendChild(wrap);
+    try{ requestAnimationFrame(window.sL); }catch(e){}
+  }
+
+  const PREV_R = window.R;
+  window.R = function(){
+    if (typeof PREV_R === 'function') PREV_R.apply(this, arguments);
+    if (activeTab() === 3) renderRemoteCard();
+  };
+
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden && activeTab() === 3 && hasApi()) {
+      loadRemote(true).then(function(){ renderRemoteCard(); });
+    }
+  });
+
+  ensureStyle();
+  setTimeout(function(){ if (activeTab() === 3) { loadRemote(false).then(function(){ renderRemoteCard(); }); } }, 600);
+})();
+</script>
+<!-- AUTO TRADE REMOTE SETTINGS + RUNTIME PERSIST INLINE PATCH END -->
+
 </body>
 </html>
